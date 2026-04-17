@@ -3,7 +3,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -19,6 +21,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
+using MediaBrowser.MediaEncoding.Probing;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
@@ -155,11 +158,23 @@ namespace MediaBrowser.Providers.MediaInfo
             return ItemUpdateType.MetadataImport;
         }
 
-        private Task<Model.MediaInfo.MediaInfo> GetMediaInfo(
+        private async Task<Model.MediaInfo.MediaInfo> GetMediaInfo(
             Video item,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // NZBDAV sidecar shortcut: `.strm` items written by the NZBDAV
+            // Jellyfin plugin are accompanied by a `.mediainfo.json` sidecar
+            // holding the full ffprobe output captured at ingest time. Parse
+            // it and skip the live probe - otherwise every PlaybackInfo call
+            // runs a 1 GB / 200 s ffprobe against the remote stream URL and
+            // stalls playback start by several seconds on UHD remuxes.
+            var sidecarResult = await TryReadMediaInfoFromSidecarAsync(item, cancellationToken).ConfigureAwait(false);
+            if (sidecarResult is not null)
+            {
+                return sidecarResult;
+            }
 
             var path = item.Path;
             var protocol = item.PathProtocol ?? MediaProtocol.File;
@@ -170,7 +185,7 @@ namespace MediaBrowser.Providers.MediaInfo
                 protocol = _mediaSourceManager.GetPathProtocol(path);
             }
 
-            return _mediaEncoder.GetMediaInfo(
+            return await _mediaEncoder.GetMediaInfo(
                 new MediaInfoRequest
                 {
                     ExtractChapters = true,
@@ -183,7 +198,72 @@ namespace MediaBrowser.Providers.MediaInfo
                         IsoType = item.IsoType
                     }
                 },
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Returns a normalized <see cref="Model.MediaInfo.MediaInfo"/> parsed
+        /// from a `.mediainfo.json` sidecar sitting next to the item's local
+        /// path, or <c>null</c> if no sidecar is present, the item is not a
+        /// shortcut (.strm), or the sidecar cannot be parsed. Callers fall
+        /// through to the live ffprobe path on <c>null</c>.
+        /// </summary>
+        private async Task<Model.MediaInfo.MediaInfo?> TryReadMediaInfoFromSidecarAsync(
+            Video item,
+            CancellationToken cancellationToken)
+        {
+            if (!item.IsShortcut)
+            {
+                return null;
+            }
+
+            var localPath = item.Path;
+            if (string.IsNullOrEmpty(localPath))
+            {
+                return null;
+            }
+
+            if (!localPath.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var sidecarPath = Path.ChangeExtension(localPath, ".mediainfo.json");
+            if (!File.Exists(sidecarPath))
+            {
+                return null;
+            }
+
+            try
+            {
+                await using var sidecar = File.OpenRead(sidecarPath);
+                var probe = await JsonSerializer.DeserializeAsync<InternalMediaInfoResult>(
+                    sidecar, (JsonSerializerOptions?)null, cancellationToken).ConfigureAwait(false);
+                if (probe is null)
+                {
+                    return null;
+                }
+
+                var streamPath = item.IsShortcut ? item.ShortcutPath : localPath;
+                var protocol = _mediaSourceManager.GetPathProtocol(streamPath);
+
+                var normalized = new ProbeResultNormalizer(_logger, _localization)
+                    .GetMediaInfo(probe, item.VideoType, isAudio: false, streamPath, protocol);
+
+                _logger.LogDebug(
+                    "Used NZBDAV sidecar for media info of {Path}; skipped live ffprobe",
+                    localPath);
+
+                return normalized;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(
+                    ex,
+                    "Failed to parse NZBDAV sidecar {SidecarPath}; falling back to live ffprobe",
+                    sidecarPath);
+                return null;
+            }
         }
 
         protected async Task Fetch(

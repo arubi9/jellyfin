@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.4
+#
+# Custom Jellyfin build with the NZBDAV sidecar-shortcut patch on
+# FFProbeVideoInfo. Patch: MediaBrowser.Providers/MediaInfo/FFProbeVideoInfo.cs
+# reads an adjacent .mediainfo.json before invoking ffprobe, eliminating the
+# 1 GB / 200 s remote probe on every PlaybackInfo for .strm items.
+#
+# Build strategy: compile only the patched assembly in a SDK image, then
+# overwrite it in the official jellyfin/jellyfin:10.11.8 runtime image. This
+# avoids rebuilding every Jellyfin DLL from source (~30 min saved) and keeps
+# ffmpeg, configs, and entrypoint identical to upstream.
+
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish MediaBrowser.Providers/MediaBrowser.Providers.csproj \
+    -c Release \
+    -o /out \
+    --no-self-contained
+
+FROM jellyfin/jellyfin:10.11.8
+COPY --from=build /out/MediaBrowser.Providers.dll /jellyfin/MediaBrowser.Providers.dll
+LABEL com.nzbdav.patched="sidecar-shortcut-v1" \
+      com.nzbdav.jellyfin-base="10.11.8"
