@@ -10,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Extensions;
+using Jellyfin.Extensions.Json;
+using Jellyfin.Extensions.Json.Converters;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
@@ -35,6 +37,12 @@ namespace MediaBrowser.Providers.MediaInfo
 {
     public class FFProbeVideoInfo
     {
+        // ffprobe's JSON output uses lowercase enum names ("video", "audio", ...)
+        // and string-as-bool fields. MediaEncoder.cs constructs this same set of
+        // options for its own parse of live ffprobe stdout; we mirror it here so
+        // .mediainfo.json sidecar files round-trip identically.
+        private static readonly JsonSerializerOptions _sidecarJsonOptions = BuildSidecarJsonOptions();
+
         private readonly ILogger<FFProbeVideoInfo> _logger;
         private readonly IMediaSourceManager _mediaSourceManager;
         private readonly IMediaEncoder _mediaEncoder;
@@ -78,6 +86,13 @@ namespace MediaBrowser.Providers.MediaInfo
             _mediaAttachmentRepository = mediaAttachmentRepository;
             _mediaStreamRepository = mediaStreamRepository;
             _mediaStreamRepository = mediaStreamRepository;
+        }
+
+        private static JsonSerializerOptions BuildSidecarJsonOptions()
+        {
+            var options = new JsonSerializerOptions(JsonDefaults.Options);
+            options.Converters.Add(new JsonBoolStringConverter());
+            return options;
         }
 
         public async Task<ItemUpdateType> ProbeVideo<T>(
@@ -238,7 +253,7 @@ namespace MediaBrowser.Providers.MediaInfo
             {
                 await using var sidecar = File.OpenRead(sidecarPath);
                 var probe = await JsonSerializer.DeserializeAsync<InternalMediaInfoResult>(
-                    sidecar, (JsonSerializerOptions?)null, cancellationToken).ConfigureAwait(false);
+                    sidecar, _sidecarJsonOptions, cancellationToken).ConfigureAwait(false);
                 if (probe is null)
                 {
                     return null;
