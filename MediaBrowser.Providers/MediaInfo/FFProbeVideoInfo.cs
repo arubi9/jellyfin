@@ -258,10 +258,11 @@ namespace MediaBrowser.Providers.MediaInfo
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(
+                _logger.LogWarning(
                     ex,
-                    "Failed to parse NZBDAV sidecar {SidecarPath}; falling back to live ffprobe",
-                    sidecarPath);
+                    "Failed to parse NZBDAV sidecar {SidecarPath} ({Message}); falling back to live ffprobe",
+                    sidecarPath,
+                    ex.Message);
                 return null;
             }
         }
